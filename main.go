@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -24,6 +23,8 @@ type AreaMap map[string]string
 type WebhookPayload struct {
 	Area        string `json:"area"`
 	Project     string `json:"project"`
+	Owner       string `json:"owner"`
+	Repo        string `json:"repo"`
 	ArtifactID  string `json:"artifact_id"`
 	GitHubToken string `json:"github_token"`
 	Signature   string `json:"signature"` // minisign signature
@@ -69,7 +70,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Step 1: download artifact
 	artifactFile := fmt.Sprintf("/tmp/%s.tar.gz", payload.Project)
-	if err := downloadArtifact(payload.ArtifactID, payload.GitHubToken, artifactFile); err != nil {
+	if err := downloadArtifact(payload.Owner, payload.Repo, payload.ArtifactID, payload.GitHubToken, artifactFile); err != nil {
 		http.Error(w, "failed to download artifact: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -127,36 +128,64 @@ func computeFinalPath(area, project string) (string, error) {
 }
 
 // downloadArtifact downloads a GitHub workflow artifact using a token
-func downloadArtifact(artifactID, token, dest string) error {
-	// GitHub API: GET /repos/:owner/:repo/actions/artifacts/:artifact_id/zip
-	// Use token in Authorization header
-	url := fmt.Sprintf("https://api.github.com/repos/<OWNER>/<REPO>/actions/artifacts/%s/zip", artifactID)
-	cmd := exec.Command("curl", "-L", "-H", "Authorization: token "+token, "-o", dest, url)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+func downloadArtifact(owner, repo, artifactID, token, dest string) error {
+	if token == "" {
+		return errors.New("missing GitHub token")
+	}
+	if owner == "" || repo == "" {
+		return errors.New("missing owner or repo")
+	}
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/artifacts/%s/zip", owner, repo, artifactID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("creating request failed: %w", err)
+	}
+	req.Header.Set("Authorization", "token "+token)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("http request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to download artifact: %s\n%s", resp.Status, string(bodyBytes))
+	}
+
+	outFile, err := os.Create(dest)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer outFile.Close()
+
+	if _, err := io.Copy(outFile, resp.Body); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	return nil
 }
 
 func verifySignature(filePath, sigData, pubKey string) error {
-	// read the artifact
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
 	}
 
-	// parse the public key
 	publicKey, err := minisign.NewPublicKey(pubKey)
 	if err != nil {
 		return fmt.Errorf("invalid public key: %w", err)
 	}
 
-	// parse the signature
 	sig, err := minisign.DecodeSignature(sigData)
 	if err != nil {
 		return fmt.Errorf("invalid signature: %w", err)
 	}
 
-	// verify
 	valid, err := publicKey.Verify(data, sig)
 	if err != nil {
 		return fmt.Errorf("signature verification error: %w", err)

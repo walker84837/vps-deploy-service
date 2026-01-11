@@ -21,6 +21,7 @@ here's an example:
 ```
 
 basically:
+
 * `area` from webhook payload is matched to a key in this json.
 * the final deployment path is constructed as:
 
@@ -41,6 +42,8 @@ an example:
 {
   "area": "repos",
   "project": "minechat",
+  "owner": "winlogon",
+  "repo": "minechat",
   ...
 }
 
@@ -56,6 +59,8 @@ the webhook expects a json post with the following structure:
 {
   "area": "repos",                // Area alias from areas.json
   "project": "minechat",          // Subfolder under the area
+  "owner": "winlogon",            // GitHub owner/org
+  "repo": "minechat",             // GitHub repository
   "artifact_id": "12345678",      // GitHub Actions artifact ID
   "github_token": "ghx_ABC123...",// Temporary Actions token
   "signature": "BASE64ENCODED..." // Minisign signature of the artifact
@@ -64,9 +69,10 @@ the webhook expects a json post with the following structure:
 
 a few notes:
 
-1. `artifact_id` is used to fetch the artifact from github.
-2. `github_token` is the *temporary token* to authenticate the artifact download.
-3. `signature` ensures integrity. the vps verifies it before deploying.
+1. `owner` + `repo` tells the VPS which GitHub repository to fetch from.
+2. `artifact_id` is used to fetch the artifact from github.
+3. `github_token` is the *temporary token* to authenticate the artifact download.
+4. `signature` ensures integrity. the vps verifies it before deploying.
 
 ## deployment workflow (step‑by‑step)
 
@@ -74,7 +80,7 @@ a few notes:
 2. ci creates a tarball: `site.tar.gz`.
 3. ci signs the tarball with minisign: `site.tar.gz.minisig`.
 4. ci uploads both files as github actions artifacts.
-5. ci calls the webhook on your vps, passing `artifact_id`, `area`, `project`, and `signature`.
+5. ci calls the webhook on your vps, passing `owner`, `repo`, `artifact_id`, `area`, `project`, and `signature`.
 6. vps fetches the artifact using `github_token`.
 7. vps verifies the signature.
 8. vps deletes `final_path` if it exists, recreates it, and extracts the tarball inside.
@@ -102,6 +108,8 @@ a few notes:
 {
   "area": "repos",
   "project": "minechat",
+  "owner": "winlogon",
+  "repo": "minechat",
   "artifact_id": "987654321",
   "github_token": "ghx_TEMPORARY_TOKEN",
   "signature": "BASE64_MINISIGN_SIG"
