@@ -1,0 +1,61 @@
+name: Build & Notify Deploy
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-name: ${{ steps.upload.outputs.artifact-url }}
+
+    steps:
+      - uses: actions/checkout@v3
+
+      # Build your site (example for astro/mkdocs)
+      - name: Build static site
+        run: |
+          # your build commands here
+          # e.g. astro build or mkdocs build
+          npm ci
+          npm run build
+
+      # Create a tarball of the build output
+      - name: Create tarball
+        run: |
+          mkdir -p output
+          tar -C dist -czf output/site.tar.gz .
+
+      # Sign the tarball with minisign
+      - name: Sign artifact
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          curl -sSfL https://jedisct1.github.io/minisign/minisign.asc | sudo apt-key add -
+          apt-get update && apt-get install -y minisign
+          minisign -S -m output/site.tar.gz
+
+      # Upload artifacts (tarball + signature)
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-deploy
+          path: |
+            output/site.tar.gz
+            output/site.tar.gz.minisig
+
+      # Notify webhook
+      - name: Send deploy webhook
+        run: |
+          curl -X POST https://deploy.winlogon.org/deploy \
+            -H "Content-Type: application/json" \
+            --data-raw "{
+              \"area\": \"repos\",
+              \"project\": \"whatever\",
+              \"artifact_id\": \"${{ steps.upload.outputs.artifact-id }}\",
+              \"github_token\": \"${{ secrets.GITHUB_TOKEN }}\",
+              \"signature\": \"$(cat output/site.tar.gz.minisig | base64)\"
+            }"
