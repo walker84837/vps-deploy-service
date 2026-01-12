@@ -12,13 +12,11 @@ jobs:
       artifact-name: ${{ steps.upload.outputs.artifact-url }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
 
-      # Build your site (example for astro/mkdocs)
+      # Build your site (example: Astro or MkDocs)
       - name: Build static site
         run: |
-          # your build commands here
-          # e.g. astro build or mkdocs build
           npm ci
           npm run build
 
@@ -28,13 +26,27 @@ jobs:
           mkdir -p output
           tar -C dist -czf output/site.tar.gz .
 
-      # Sign the tarball with minisign
+      # Install the latest Minisign dynamically
+      - name: Install Minisign
+        run: |
+          ARCH=$(uname -m)
+          LATEST=$(curl -s https://api.github.com/repos/jedisct1/minisign/releases/latest \
+            | grep "browser_download_url" \
+            | grep "linux" \
+            | grep "$ARCH" \
+            | grep -v "\.minisig" \
+            | cut -d '"' -f 4)
+          echo "Downloading $LATEST..."
+          curl -sL "$LATEST" -o minisign.tar.gz
+          tar -xzf minisign.tar.gz
+          sudo mv minisign-linux/$ARCH/minisign /usr/local/bin/
+          minisign -V
+
+      # Sign the tarball
       - name: Sign artifact
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
-          curl -sSfL https://jedisct1.github.io/minisign/minisign.asc | sudo apt-key add -
-          apt-get update && apt-get install -y minisign
           minisign -S -m output/site.tar.gz
 
       # Upload artifacts (tarball + signature)
@@ -46,6 +58,7 @@ jobs:
           path: |
             output/site.tar.gz
             output/site.tar.gz.minisig
+          overwrite: true
 
       # Notify webhook
       - name: Send deploy webhook
@@ -55,6 +68,8 @@ jobs:
             --data-raw "{
               \"area\": \"repos\",
               \"project\": \"whatever\",
+              \"owner\": \"<GITHUB_OWNER>\",
+              \"repo\": \"<GITHUB_REPO>\",
               \"artifact_id\": \"${{ steps.upload.outputs.artifact-id }}\",
               \"github_token\": \"${{ secrets.GITHUB_TOKEN }}\",
               \"signature\": \"$(cat output/site.tar.gz.minisig | base64)\"
