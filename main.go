@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -170,25 +171,36 @@ func downloadArtifact(owner, repo, artifactID, token, dest string) error {
 	return nil
 }
 
-func verifySignature(filePath, sigData, pubKey string) error {
+// verifySignature reads the file, decodes the base64 signature, and verifies it
+func verifySignature(filePath, base64Sig, pubKey string) error {
+	// Read the file to verify
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
 	}
 
+	// Decode the base64-encoded signature
+	sigBytes, err := base64.StdEncoding.DecodeString(base64Sig)
+	if err != nil {
+		return errors.New("invalid base64 signature: " + err.Error())
+	}
+
+	// Parse the minisign public key
 	publicKey, err := minisign.NewPublicKey(pubKey)
 	if err != nil {
-		return fmt.Errorf("invalid public key: %w", err)
+		return errors.New("invalid public key: " + err.Error())
 	}
 
-	sig, err := minisign.DecodeSignature(sigData)
+	// Decode the minisign signature
+	sig, err := minisign.DecodeSignature(string(sigBytes))
 	if err != nil {
-		return fmt.Errorf("invalid signature: %w", err)
+		return errors.New("invalid signature format: " + err.Error())
 	}
 
+	// Verify the signature
 	valid, err := publicKey.Verify(data, sig)
 	if err != nil {
-		return fmt.Errorf("signature verification error: %w", err)
+		return errors.New("signature verification error: " + err.Error())
 	}
 	if !valid {
 		return errors.New("signature verification failed")
