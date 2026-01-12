@@ -137,25 +137,48 @@ func downloadArtifact(owner, repo, artifactID, token, dest string) error {
 		return errors.New("missing owner or repo")
 	}
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/artifacts/%s/zip", owner, repo, artifactID)
+	// Use archive_format=zip
+	url := fmt.Sprintf(
+		"https://api.github.com/repos/%s/%s/actions/artifacts/%s/zip",
+		owner, repo, artifactID,
+	)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("creating request failed: %w", err)
 	}
-	req.Header.Set("Authorization", "token "+token)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
 
-	client := &http.Client{}
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Allow following redirects (the 302)
+			return nil
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("http request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to download artifact: %s\n%s", resp.Status, string(bodyBytes))
+	}
+
+	// If 302 Found, the redirect location is the actual zip URL
+	if resp.StatusCode == http.StatusFound {
+		redirectURL := resp.Header.Get("Location")
+		if redirectURL == "" {
+			return errors.New("artifact redirect location missing")
+		}
+		// Download from redirect URL
+		resp, err = http.Get(redirectURL)
+		if err != nil {
+			return fmt.Errorf("failed to download redirected artifact: %w", err)
+		}
+		defer resp.Body.Close()
 	}
 
 	outFile, err := os.Create(dest)
