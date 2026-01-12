@@ -6,13 +6,17 @@ this service allows your vps to securely deploy artifacts from github actions wi
 - verifies its signature
 - deploys it to the proper location
 
-## configuration file
+## configuration
 
-this service needs an `areas.json`, which defines deployment areas (aliases) on your vps. this is to:
-- avoid leaking internal filesystem paths;
-- prevent unauthorized writes.
+this service requires two files in its working directory:
 
-here's an example:
+1. `areas.json`: defines deployment areas (aliases) on your vps.
+2. `minisign.pub`: the public key used to verify artifact signatures.
+
+### `areas.json`
+
+this file prevents leaking internal filesystem paths and unauthorized writes. here's an example:
+
 ```json
 {
   "repos": "/home/actions/repos",
@@ -23,37 +27,11 @@ here's an example:
 basically:
 
 * `area` from webhook payload is matched to a key in this json.
-* the final deployment path is constructed as:
-
-```
-final_path = areas[area] + "/" + project
-```
-
-an example:
-
-```json
-// areas.json
-{
-  "repos": "/home/actions/repos",
-  "swiftlink": "/home/actions/swiftlink"
-}
-
-// Webhook payload
-{
-  "area": "repos",
-  "project": "minechat",
-  "owner": "winlogon",
-  "repo": "minechat",
-  ...
-}
-
-// Final path
-/home/actions/repos/minechat
-```
+* the final deployment path is constructed as: `areas[area] + "/" + project`
 
 ## webhook payload format
 
-the webhook expects a json post with the following structure:
+the service listens on `:8080` and the endpoint is `POST /deploy`. the payload must be a json with the following structure:
 
 ```jsonc
 {
@@ -63,27 +41,20 @@ the webhook expects a json post with the following structure:
   "repo": "minechat",             // GitHub repository
   "artifact_id": "12345678",      // GitHub Actions artifact ID
   "github_token": "ghx_ABC123...",// Temporary Actions token
-  "signature": "BASE64ENCODED..." // Minisign signature of the artifact
+  "signature": "BASE64ENCODED..." // Base64 encoded minisign signature file content
 }
 ```
 
-a few notes:
-
-1. `owner` + `repo` tells the VPS which GitHub repository to fetch from.
-2. `artifact_id` is used to fetch the artifact from github.
-3. `github_token` is the *temporary token* to authenticate the artifact download.
-4. `signature` ensures integrity. the vps verifies it before deploying.
-
 ## deployment workflow (step‑by‑step)
 
-1. ci builds the project (e.g., static site in `site/` folder).
-2. ci creates a tarball: `site.tar.gz`.
-3. ci signs the tarball with minisign: `site.tar.gz.minisig`.
-4. ci uploads both files as github actions artifacts.
-5. ci calls the webhook on your vps, passing `owner`, `repo`, `artifact_id`, `area`, `project`, and `signature`.
-6. vps fetches the artifact using `github_token`.
-7. vps verifies the signature.
-8. vps deletes `final_path` if it exists, recreates it, and extracts the tarball inside.
+1. ci builds the project (e.g., static site in `dist/` folder).
+2. ci creates a tarball
+3. ci signs the tarball with minisign: `minisign -S -m site.tar.gz`.
+4. ci uploads `site.tar.gz` as a github actions artifact.
+5. ci calls the webhook `POST /deploy` on your vps, passing the metadata and the base64-encoded content of `site.tar.gz.minisig` as the `signature`.
+6. vps fetches the zip artifact from github using `github_token`.
+7. vps extracts the `.tar.gz` from the zip and verifies its signature against `minisign.pub`.
+8. vps deletes `final_path` if it exists, recreates it, and extracts the tarball contents inside.
 
 *Result*: A clean deploy:
 

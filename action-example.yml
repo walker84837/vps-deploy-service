@@ -2,7 +2,16 @@ name: Build & Notify Deploy
 
 on:
   push:
-    branches: ["main"]
+    # whatever branch you wanna deploy
+    branches: ["docs"]
+    # what files trigger the workflow
+    paths:
+      - "src/**"
+      - "book.toml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "book.toml"
 
 jobs:
   build:
@@ -14,63 +23,106 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Build your site (example: Astro or MkDocs)
-      - name: Build static site
+      - name: Build documentation
         run: |
-          npm ci
-          npm run build
+          # Replace this with whatever builds your site/docs
+          # Examples:
+          # mdbook build
+          # npm run build
+          # hugo
+          echo "Build step goes here"
 
-      # Create a tarball of the build output
       - name: Create tarball
         run: |
           mkdir -p output
-          tar -C dist -czf output/site.tar.gz .
+          tar -C page -czf output/page.tar.gz .
 
       # Install the latest Minisign dynamically
       - name: Install Minisign
         run: |
           ARCH=$(uname -m)
+          if [ "$ARCH" = "x86_64" ]; then
+              ARCH="x86_64"
+          elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+              ARCH="aarch64"
+          else
+              echo "Unsupported architecture: $ARCH"
+              exit 1
+          fi
+
+          # Get latest release URL
           LATEST=$(curl -s https://api.github.com/repos/jedisct1/minisign/releases/latest \
-            | grep "browser_download_url" \
-            | grep "linux" \
-            | grep "$ARCH" \
-            | grep -v "\.minisig" \
-            | cut -d '"' -f 4)
+              | grep "browser_download_url" \
+              | grep "linux" \
+              | grep -v "\.minisig" \
+              | cut -d '"' -f 4 | head -n1)
+
+          if [ -z "$LATEST" ]; then
+              echo "No release found for $ARCH"
+              exit 1
+          fi
+
           echo "Downloading $LATEST..."
           curl -sL "$LATEST" -o minisign.tar.gz
-          tar -xzf minisign.tar.gz
-          sudo mv minisign-linux/$ARCH/minisign /usr/local/bin/
-          minisign -V
 
-      # Sign the tarball
-      - name: Sign artifact
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          # Extract the binary
+          tar -xzf minisign.tar.gz "minisign-linux/$ARCH/minisign"
+
+          # Make it executable
+          chmod +x minisign-linux/$ARCH/minisign
+
+          # Move to /usr/local/bin
+          sudo mv minisign-linux/$ARCH/minisign /usr/local/bin/
+
+          # Verify correct installation
+          minisign -v
+
+      - name: Prepare Minisign secret key
         run: |
-          minisign -S -m output/site.tar.gz
+          mkdir -p ~/.minisign
+          echo "${{ secrets.MINISIGN_SECRET_KEY }}" > ~/.minisign/minisign.key
+          chmod 600 ~/.minisign/minisign.key
+
+      - name: Sign artifact
+        run: |
+          minisign -S -m output/page.tar.gz
 
       # Upload artifacts (tarball + signature)
       - name: Upload artifact
         id: upload
         uses: actions/upload-artifact@v4
         with:
-          name: site-deploy
-          path: |
-            output/site.tar.gz
-            output/site.tar.gz.minisig
-          overwrite: true
+          name: page-deploy
+          path: output/page.tar.gz
 
       # Notify webhook
       - name: Send deploy webhook
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Encode signature as single-line base64
+          SIGNATURE=$(base64 -w0 output/page.tar.gz.minisig | jq -Rs .)
+          echo "Signature: $SIGNATURE"
+
+          # Get artifact ID for this workflow run
+          RUN_ID=${GITHUB_RUN_ID}
+          ARTIFACT_ID=$(curl -s \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            | jq '.artifacts[] | select(.name=="page-deploy") | .id')
+
+          echo "Artifact ID: $ARTIFACT_ID"
+
+          # Send webhook
           curl -X POST https://deploy.winlogon.org/deploy \
             -H "Content-Type: application/json" \
             --data-raw "{
               \"area\": \"repos\",
-              \"project\": \"whatever\",
-              \"owner\": \"<GITHUB_OWNER>\",
-              \"repo\": \"<GITHUB_REPO>\",
-              \"artifact_id\": \"${{ steps.upload.outputs.artifact-id }}\",
-              \"github_token\": \"${{ secrets.GITHUB_TOKEN }}\",
-              \"signature\": \"$(cat output/site.tar.gz.minisig | base64)\"
+              \"project\": \"kyori-component-json\",
+              \"owner\": \"walker84837\",
+              \"repo\": \"kyori-component-json\",
+              \"artifact_id\": \"$ARTIFACT_ID\",
+              \"github_token\": \"$GITHUB_TOKEN\",
+              \"signature\": $SIGNATURE
             }"
