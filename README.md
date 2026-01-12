@@ -130,3 +130,9 @@ a few notes:
 * requires a short-lived github token. no permanent secrets stored on vps.
 * verified with minisign before deployment.
 * vps controls `areas.json` to prevent unauthorized filesystem writes.
+
+## roadmap
+
+- [ ] `.service` file for systemd Linux distros
+- [ ] cli flags (`flag` package)
+- [ ] more verbose logging
