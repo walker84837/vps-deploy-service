@@ -68,42 +68,54 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Deploying project '%s' to '%s'\n", payload.Project, dest)
+	log.Printf("Deploying %s -> %s\n", payload.Project, dest)
 
-	// Step 1: download artifact
-	artifactFile, err := downloadArtifact(payload.Owner, payload.Repo, payload.ArtifactID, payload.GitHubToken, payload.Project)
+	// Step 1: download ZIP artifact
+	zipPath, err := downloadArtifact(
+		payload.Owner,
+		payload.Repo,
+		payload.ArtifactID,
+		payload.GitHubToken,
+	)
 	if err != nil {
-		http.Error(w, "failed to download artifact: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
-	defer os.Remove(artifactFile) // clean up temp file
+	defer os.Remove(zipPath)
 
-	// Step 2: verify signature
-	pubKeyBytes, err := os.ReadFile("minisign.pub")
+	// Step 2: extract .tar.gz from ZIP
+	tarGzPath, err := extractTarGzFromZip(zipPath)
 	if err != nil {
-		http.Error(w, "missing public key: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
-	if err := verifySignature(artifactFile, payload.Signature, string(pubKeyBytes)); err != nil {
-		http.Error(w, "signature verification failed: "+err.Error(), http.StatusForbidden)
+	defer os.Remove(tarGzPath)
+
+	// Step 3: verify minisign signature AGAINST tar.gz
+	pubKey, err := os.ReadFile("minisign.pub")
+	if err != nil {
+		http.Error(w, "missing minisign.pub", 500)
 		return
 	}
 
-	// Step 3: remove old folder
+	if err := verifySignature(tarGzPath, payload.Signature, string(pubKey)); err != nil {
+		http.Error(w, "signature verification failed: "+err.Error(), 403)
+		return
+	}
+
+	// Step 4: wipe old deploy
 	if err := os.RemoveAll(dest); err != nil {
-		http.Error(w, "failed to remove old project folder: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
-
-	// Step 4: recreate folder
 	if err := os.MkdirAll(dest, 0755); err != nil {
-		http.Error(w, "failed to create project folder: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
 
-	// Step 5: extract tar.gz from inside the zip
-	if err := extractTarGzFromZip(artifactFile, dest); err != nil {
-		http.Error(w, "failed to extract artifact: "+err.Error(), http.StatusInternalServerError)
+	// Step 5: extract tar.gz contents
+	if err := extractTarGz(tarGzPath, dest); err != nil {
+		http.Error(w, err.Error(), 500)
 		return
 	}
 
@@ -111,11 +123,12 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("success"))
 }
 
-// extractTarGzFromZip extracts the first .tar.gz file from a ZIP to destPath
-func extractTarGzFromZip(zipPath, destPath string) error {
+// extractTarGzFromZip extracts the first .tar.gz file from a ZIP
+// and writes it to a temp file, returning its path.
+func extractTarGzFromZip(zipPath string) (string, error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer r.Close()
 
@@ -123,25 +136,25 @@ func extractTarGzFromZip(zipPath, destPath string) error {
 		if strings.HasSuffix(f.Name, ".tar.gz") {
 			rc, err := f.Open()
 			if err != nil {
-				return err
+				return "", err
 			}
 			defer rc.Close()
 
-			outFile, err := os.Create(destPath)
+			tmp, err := os.CreateTemp("", "artifact-*.tar.gz")
 			if err != nil {
-				return err
+				return "", err
 			}
-			defer outFile.Close()
+			defer tmp.Close()
 
-			if _, err := io.Copy(outFile, rc); err != nil {
-				return err
+			if _, err := io.Copy(tmp, rc); err != nil {
+				return "", err
 			}
 
-			return nil // successfully extracted
+			return tmp.Name(), nil
 		}
 	}
 
-	return errors.New(".tar.gz not found in ZIP")
+	return "", errors.New(".tar.gz not found in ZIP")
 }
 
 // computeFinalPath combines area alias and project name safely
@@ -164,8 +177,8 @@ func computeFinalPath(area, project string) (string, error) {
 }
 
 // downloadArtifact downloads a GitHub workflow artifact using a token
-// downloadArtifact downloads a GitHub workflow artifact using a token
-func downloadArtifact(owner, repo, artifactID, token, project string) (string, error) {
+// and saves it to a uniquely named temporary file, returning the file path.
+func downloadArtifact(owner, repo, artifactID, token string) (string, error) {
 	if token == "" {
 		return "", errors.New("missing GitHub token")
 	}
@@ -209,7 +222,6 @@ func downloadArtifact(owner, repo, artifactID, token, project string) (string, e
 		if redirectURL == "" {
 			return "", errors.New("artifact redirect location missing")
 		}
-		// Download from redirect URL
 		resp, err = http.Get(redirectURL)
 		if err != nil {
 			return "", fmt.Errorf("failed to download redirected artifact: %w", err)
@@ -217,54 +229,52 @@ func downloadArtifact(owner, repo, artifactID, token, project string) (string, e
 		defer resp.Body.Close()
 	}
 
-	// Create a temp file path using os.TempDir
-	dest := filepath.Join(os.TempDir(), fmt.Sprintf("%s.zip", project))
-	outFile, err := os.Create(dest)
+	// Create a temp file for the artifact
+	tmpFile, err := os.CreateTemp("", "artifact-*.zip")
 	if err != nil {
-		return "", fmt.Errorf("failed to create file: %w", err)
+		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer outFile.Close()
+	defer tmpFile.Close()
 
-	if _, err := io.Copy(outFile, resp.Body); err != nil {
-		return "", fmt.Errorf("failed to write file: %w", err)
+	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		return "", fmt.Errorf("failed to write artifact to temp file: %w", err)
 	}
 
-	return dest, nil
+	// Return the path of the temp file
+	return tmpFile.Name(), nil
 }
 
 // verifySignature reads the file, decodes the base64 signature, and verifies it
 func verifySignature(filePath, base64Sig, pubKey string) error {
-	// Read the file to verify
+	// Strip surrounding quotes (JSON artifact)
+	base64Sig = strings.Trim(base64Sig, "\"")
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
 	}
 
-	// Decode the base64-encoded signature
 	sigBytes, err := base64.StdEncoding.DecodeString(base64Sig)
 	if err != nil {
-		return errors.New("invalid base64 signature: " + err.Error())
+		return fmt.Errorf("invalid base64 signature: %w", err)
 	}
 
-	// Parse the minisign public key
 	publicKey, err := minisign.NewPublicKey(pubKey)
 	if err != nil {
-		return errors.New("invalid public key: " + err.Error())
+		return fmt.Errorf("invalid public key: %w", err)
 	}
 
-	// Decode the minisign signature
 	sig, err := minisign.DecodeSignature(string(sigBytes))
 	if err != nil {
-		return errors.New("invalid signature format: " + err.Error())
+		return fmt.Errorf("invalid minisign format: %w", err)
 	}
 
-	// Verify the signature
-	valid, err := publicKey.Verify(data, sig)
+	ok, err := publicKey.Verify(data, sig)
 	if err != nil {
-		return errors.New("signature verification error: " + err.Error())
+		return err
 	}
-	if !valid {
-		return errors.New("signature verification failed")
+	if !ok {
+		return errors.New("invalid signature")
 	}
 
 	return nil
