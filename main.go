@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
@@ -70,11 +71,12 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Deploying project '%s' to '%s'\n", payload.Project, dest)
 
 	// Step 1: download artifact
-	artifactFile := fmt.Sprintf("/tmp/%s.tar.gz", payload.Project)
-	if err := downloadArtifact(payload.Owner, payload.Repo, payload.ArtifactID, payload.GitHubToken, artifactFile); err != nil {
+	artifactFile, err := downloadArtifact(payload.Owner, payload.Repo, payload.ArtifactID, payload.GitHubToken, payload.Project)
+	if err != nil {
 		http.Error(w, "failed to download artifact: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer os.Remove(artifactFile) // clean up temp file
 
 	// Step 2: verify signature
 	pubKeyBytes, err := os.ReadFile("minisign.pub")
@@ -99,14 +101,47 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 5: extract tar.gz
-	if err := extractTarGz(artifactFile, dest); err != nil {
+	// Step 5: extract tar.gz from inside the zip
+	if err := extractTarGzFromZip(artifactFile, dest); err != nil {
 		http.Error(w, "failed to extract artifact: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	log.Printf("Deployment complete: %s\n", dest)
 	w.Write([]byte("success"))
+}
+
+// extractTarGzFromZip extracts the first .tar.gz file from a ZIP to destPath
+func extractTarGzFromZip(zipPath, destPath string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if strings.HasSuffix(f.Name, ".tar.gz") {
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+
+			outFile, err := os.Create(destPath)
+			if err != nil {
+				return err
+			}
+			defer outFile.Close()
+
+			if _, err := io.Copy(outFile, rc); err != nil {
+				return err
+			}
+
+			return nil // successfully extracted
+		}
+	}
+
+	return errors.New(".tar.gz not found in ZIP")
 }
 
 // computeFinalPath combines area alias and project name safely
@@ -129,12 +164,13 @@ func computeFinalPath(area, project string) (string, error) {
 }
 
 // downloadArtifact downloads a GitHub workflow artifact using a token
-func downloadArtifact(owner, repo, artifactID, token, dest string) error {
+// downloadArtifact downloads a GitHub workflow artifact using a token
+func downloadArtifact(owner, repo, artifactID, token, project string) (string, error) {
 	if token == "" {
-		return errors.New("missing GitHub token")
+		return "", errors.New("missing GitHub token")
 	}
 	if owner == "" || repo == "" {
-		return errors.New("missing owner or repo")
+		return "", errors.New("missing owner or repo")
 	}
 
 	// Use archive_format=zip
@@ -145,7 +181,7 @@ func downloadArtifact(owner, repo, artifactID, token, dest string) error {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("creating request failed: %w", err)
+		return "", fmt.Errorf("creating request failed: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -158,40 +194,42 @@ func downloadArtifact(owner, repo, artifactID, token, dest string) error {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("http request failed: %w", err)
+		return "", fmt.Errorf("http request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to download artifact: %s\n%s", resp.Status, string(bodyBytes))
+		return "", fmt.Errorf("failed to download artifact: %s\n%s", resp.Status, string(bodyBytes))
 	}
 
 	// If 302 Found, the redirect location is the actual zip URL
 	if resp.StatusCode == http.StatusFound {
 		redirectURL := resp.Header.Get("Location")
 		if redirectURL == "" {
-			return errors.New("artifact redirect location missing")
+			return "", errors.New("artifact redirect location missing")
 		}
 		// Download from redirect URL
 		resp, err = http.Get(redirectURL)
 		if err != nil {
-			return fmt.Errorf("failed to download redirected artifact: %w", err)
+			return "", fmt.Errorf("failed to download redirected artifact: %w", err)
 		}
 		defer resp.Body.Close()
 	}
 
+	// Create a temp file path using os.TempDir
+	dest := filepath.Join(os.TempDir(), fmt.Sprintf("%s.zip", project))
 	outFile, err := os.Create(dest)
 	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
+		return "", fmt.Errorf("failed to create file: %w", err)
 	}
 	defer outFile.Close()
 
 	if _, err := io.Copy(outFile, resp.Body); err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
+		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	return nil
+	return dest, nil
 }
 
 // verifySignature reads the file, decodes the base64 signature, and verifies it
