@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -35,8 +36,23 @@ type WebhookPayload struct {
 var areas AreaMap
 
 func main() {
+	port := flag.Int("port", 8080, "port to listen on")
+	endpoint := flag.String("endpoint", "/deploy", "endpoint to listen on, e.g. /deploy")
+	areasFile := flag.String("areas", "areas.json", "area map file")
+
+	flag.Parse()
+
+	if flag.NFlag() == 0 {
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	if len(*endpoint) == 0 {
+		*endpoint = "/"
+	}
+
 	// Load area map from file
-	f, err := os.Open("areas.json")
+	f, err := os.Open(*areasFile)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -45,9 +61,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	http.HandleFunc("/deploy", deployHandler)
-	log.Println("Listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	http.HandleFunc(*endpoint, deployHandler)
+	log.Printf("Listening on :%d", *port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
 
 func deployHandler(w http.ResponseWriter, r *http.Request) {
